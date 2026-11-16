@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -224,7 +225,7 @@ func probeTCP(parent context.Context, probe TCPProbe, autoPort uint16) error {
 		attemptTimeout := min(probeDialTimeout, time.Until(deadline(ctx)))
 		connection, err := (&net.Dialer{Timeout: attemptTimeout}).DialContext(ctx, "tcp4", address)
 		if probe.State == "closed" {
-			if errors.Is(err, syscall.ECONNREFUSED) {
+			if isConnectionRefused(err) {
 				return nil
 			}
 			if err != nil && ctx.Err() == nil {
@@ -250,7 +251,7 @@ func probeTCP(parent context.Context, probe TCPProbe, autoPort uint16) error {
 				return fmt.Errorf("TCP probe %s banner %q does not match %q", address, got, probe.Banner)
 			}
 			last = fmt.Sprintf("read banner: %v", readErr)
-		} else if errors.Is(err, syscall.ECONNREFUSED) || ctx.Err() != nil {
+		} else if isConnectionRefused(err) || ctx.Err() != nil {
 			last = fmt.Sprintf("dial: %v", err)
 		} else {
 			return fmt.Errorf("TCP probe %s: %w", address, err)
@@ -260,6 +261,15 @@ func probeTCP(parent context.Context, probe TCPProbe, autoPort uint16) error {
 		case <-time.After(probePollInterval):
 		}
 	}
+}
+
+func isConnectionRefused(err error) bool {
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	// Windows connectex reports WSAECONNREFUSED (10061), which is distinct
+	// from syscall.ECONNREFUSED on that platform.
+	return runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(10061))
 }
 
 func deadline(ctx context.Context) time.Time {
