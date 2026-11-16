@@ -1,0 +1,91 @@
+schema: sliver-ext-e2e/v1
+
+sliver:
+  version: master
+
+defaults:
+  modes: [session, beacon]
+  repeat: 1
+  command_timeout: 2m
+
+suites:
+  - name: linux-amd64-stateful-rfb
+    target: {os: linux, arch: amd64}
+    tests:
+      - name: lifecycle
+        library: test/fixture/build/linux/amd64/stateful_rfb_extension.so
+        export: FixtureControl
+        init: FixtureInit
+        steps:
+          - name: start
+            args_utf8: 'start --port ${TCP_PORT}'
+            expect:
+              output:
+                equals: started
+            tcp_probe:
+              port: auto
+              state: open
+              timeout: 10s
+              banner_utf8: "RFB 003.008\n"
+            command_probe:
+              path: test/fixture/rfb_probe.py
+              args: ['--port', '${TCP_PORT}']
+              timeout: 15s
+
+          - name: status-running
+            args_utf8: status
+            expect:
+              output:
+                equals: running
+
+          - name: duplicate-start
+            args_utf8: 'start --port ${TCP_PORT}'
+            expect:
+              output:
+                equals: already-running
+            tcp_probe:
+              port: auto
+              state: open
+              timeout: 10s
+              banner_utf8: "RFB 003.008\n"
+
+          - name: stop
+            args_utf8: stop
+            expect:
+              output:
+                equals: stopped
+            tcp_probe:
+              port: auto
+              state: closed
+              timeout: 10s
+
+          - name: status-stopped
+            args_utf8: status
+            expect:
+              output:
+                equals: stopped
+
+          - name: restart
+            args_utf8: 'start --port ${TCP_PORT}'
+            expect:
+              output:
+                equals: started
+            tcp_probe:
+              port: auto
+              state: open
+              timeout: 10s
+              banner_utf8: "RFB 003.008\n"
+            command_probe:
+              path: test/fixture/rfb_probe.py
+              args: ['--port', '${TCP_PORT}']
+              timeout: 15s
+
+          - name: stop-again
+            args_utf8: stop
+            expect:
+              output:
+                equals: stopped
+            tcp_probe:
+              port: auto
+              state: closed
+              timeout: 10s

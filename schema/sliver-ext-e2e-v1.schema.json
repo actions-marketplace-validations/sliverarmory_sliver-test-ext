@@ -94,6 +94,45 @@
         { "required": ["output"], "properties": { "success_only": { "const": false } } }
       ]
     },
+    "tcpProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port", "state"],
+      "properties": {
+        "port": { "anyOf": [{ "type": "integer", "minimum": 1, "maximum": 65535 }, { "const": "auto" }] },
+        "state": { "enum": ["open", "closed"] },
+        "timeout": { "type": "string", "minLength": 1 },
+        "banner_utf8": { "type": "string", "maxLength": 4096 }
+      },
+      "if": { "properties": { "state": { "const": "closed" } }, "required": ["state"] },
+      "then": { "not": { "required": ["banner_utf8"] } }
+    },
+    "commandProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$)).+$" },
+        "args": { "type": "array", "maxItems": 32, "items": { "type": "string", "maxLength": 4096 } },
+        "timeout": { "type": "string", "minLength": 1 }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "expect"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "export": { "type": "string", "minLength": 1 },
+        "args_utf8": { "type": "string", "maxLength": 16777216 },
+        "args_base64": { "type": "string" },
+        "command_timeout": { "type": "string", "minLength": 1 },
+        "expect": { "$ref": "#/$defs/expect" },
+        "tcp_probe": { "$ref": "#/$defs/tcpProbe" },
+        "command_probe": { "$ref": "#/$defs/commandProbe" }
+      },
+      "not": { "required": ["args_utf8", "args_base64"] }
+    },
     "test": {
       "allOf": [
         { "$ref": "#/$defs/settings" },
@@ -102,8 +141,13 @@
           "required": ["name", "library"],
           "properties": {
             "name": { "type": "string", "minLength": 1 },
-            "library": { "type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$)).*\\.(?:[dD][lL][lL]|[sS][oO]|[dD][yY][lL][iI][bB])$" }
+            "library": { "type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$)).*\\.(?:[dD][lL][lL]|[sS][oO]|[dD][yY][lL][iI][bB])$" },
+            "steps": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/step" } }
           }
+        },
+        {
+          "if": { "required": ["steps"] },
+          "then": { "not": { "anyOf": [{ "required": ["args_utf8"] }, { "required": ["args_base64"] }, { "required": ["expect"] }] } }
         }
       ],
       "unevaluatedProperties": false

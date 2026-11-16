@@ -42,22 +42,25 @@ type Report struct {
 }
 
 type CaseResult struct {
-	ID            string        `json:"id,omitempty"`
-	Suite         string        `json:"suite"`
-	Test          string        `json:"test"`
-	Collection    string        `json:"collection,omitempty"`
-	Library       string        `json:"library"`
-	LibrarySHA256 string        `json:"library_sha256,omitempty"`
-	Export        string        `json:"export"`
-	Init          string        `json:"init,omitempty"`
-	Mode          string        `json:"mode"`
-	Repeat        int           `json:"repeat"`
-	Status        string        `json:"status"`
-	Stage         string        `json:"stage,omitempty"`
-	Duration      time.Duration `json:"-"`
-	DurationMS    int64         `json:"duration_ms"`
-	OutputFile    string        `json:"output_file,omitempty"`
-	Error         string        `json:"error,omitempty"`
+	ID              string        `json:"id,omitempty"`
+	Suite           string        `json:"suite"`
+	Test            string        `json:"test"`
+	Collection      string        `json:"collection,omitempty"`
+	Step            string        `json:"step,omitempty"`
+	StepIndex       int           `json:"step_index,omitempty"`
+	Library         string        `json:"library"`
+	LibrarySHA256   string        `json:"library_sha256,omitempty"`
+	Export          string        `json:"export"`
+	Init            string        `json:"init,omitempty"`
+	Mode            string        `json:"mode"`
+	Repeat          int           `json:"repeat"`
+	Status          string        `json:"status"`
+	Stage           string        `json:"stage,omitempty"`
+	Duration        time.Duration `json:"-"`
+	DurationMS      int64         `json:"duration_ms"`
+	OutputFile      string        `json:"output_file,omitempty"`
+	ProbeOutputFile string        `json:"probe_output_file,omitempty"`
+	Error           string        `json:"error,omitempty"`
 }
 
 func New(target string) *Report {
@@ -114,6 +117,7 @@ type junitSuite struct {
 	Name     string      `xml:"name,attr"`
 	Tests    int         `xml:"tests,attr"`
 	Failures int         `xml:"failures,attr"`
+	Skipped  int         `xml:"skipped,attr,omitempty"`
 	Time     string      `xml:"time,attr"`
 	Cases    []junitCase `xml:"testcase"`
 }
@@ -123,11 +127,16 @@ type junitCase struct {
 	Classname string        `xml:"classname,attr"`
 	Time      string        `xml:"time,attr"`
 	Failure   *junitFailure `xml:"failure,omitempty"`
+	Skipped   *junitSkipped `xml:"skipped,omitempty"`
 }
 
 type junitFailure struct {
 	Message string `xml:"message,attr"`
 	Body    string `xml:",chardata"`
+}
+
+type junitSkipped struct {
+	Message string `xml:"message,attr"`
 }
 
 func (r *Report) JUnit() string {
@@ -164,7 +173,10 @@ func (r *Report) JUnit() string {
 			Classname: result.Suite + "." + strings.ReplaceAll(r.Target, "/", "."),
 			Time:      fmt.Sprintf("%.3f", float64(result.DurationMS)/1000),
 		}
-		if result.Status != "pass" {
+		if result.Status == "skipped" {
+			suite.Skipped++
+			item.Skipped = &junitSkipped{Message: result.Stage}
+		} else if result.Status != "pass" {
 			suite.Failures++
 			item.Failure = &junitFailure{Message: result.Stage, Body: result.Error}
 		}
@@ -210,13 +222,16 @@ func (r *Report) Markdown() string {
 }
 
 func caseDisplayName(result CaseResult) string {
+	base := result.Test
 	if result.ID != "" {
-		return result.ID
+		base = result.ID
+	} else if result.Collection != "" {
+		base = result.Collection + "/" + result.Test
 	}
-	if result.Collection != "" {
-		return result.Collection + "/" + result.Test
+	if result.Step != "" {
+		return fmt.Sprintf("%s/%d:%s", base, result.StepIndex, result.Step)
 	}
-	return result.Test
+	return base
 }
 
 func escapeCell(value string) string {

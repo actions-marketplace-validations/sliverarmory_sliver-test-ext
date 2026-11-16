@@ -38,6 +38,8 @@ exec env -i \
 	LC_ALL="${LC_ALL:-}" \
 	LC_CTYPE="${LC_CTYPE:-}" \
 	TZ="${TZ:-}" \
+	DISPLAY="${DISPLAY:-}" \
+	XAUTHORITY="${XAUTHORITY:-}" \
 	SSL_CERT_DIR="${SSL_CERT_DIR:-}" \
 	SSL_CERT_FILE="${SSL_CERT_FILE:-}" \
 	RUNNER_TEMP="${RUNNER_TEMP:-}" \

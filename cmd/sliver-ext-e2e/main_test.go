@@ -189,6 +189,50 @@ func TestVerifyCaseCoverage(t *testing.T) {
 	}
 }
 
+func TestVerifyCaseCoverageRequiresEachOrderedStep(t *testing.T) {
+	library := filepath.Join(t.TempDir(), "stateful.so")
+	data := []byte("stateful library bytes")
+	if err := os.WriteFile(library, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	plan := manifest.Plan{
+		ID: "vnc/lifecycle", Suite: "vnc", Name: "lifecycle", Library: library,
+		LibraryPath: "stateful.so", Target: manifest.Target{OS: "linux", Arch: "amd64"},
+		Settings: manifest.Settings{Init: "Initialize", Modes: []string{manifest.ModeSession}, Repeat: 1},
+		Steps:    []manifest.Step{{Name: "start", Export: "Run"}, {Name: "stop", Export: "Run"}},
+	}
+	result := func(index int, name string) results.CaseResult {
+		return results.CaseResult{
+			ID: plan.ID, Suite: plan.Suite, Test: plan.Name, Library: plan.LibraryPath,
+			LibrarySHA256: hex.EncodeToString(digest[:]), Export: "Run", Init: "Initialize",
+			Mode: manifest.ModeSession, Repeat: 1, Step: name, StepIndex: index, Status: "pass",
+		}
+	}
+	complete := results.Report{Target: plan.Target.Key(), Cases: []results.CaseResult{result(1, "start"), result(2, "stop")}}
+	if err := verifyCaseCoverage([]manifest.Plan{plan}, []results.Report{complete}); err != nil {
+		t.Fatalf("complete sequence: %v", err)
+	}
+	missing := complete
+	missing.Cases = missing.Cases[:1]
+	if err := verifyCaseCoverage([]manifest.Plan{plan}, []results.Report{missing}); err == nil || !strings.Contains(err.Error(), "missing case linux/amd64/vnc/lifecycle/session#1/step-2") {
+		t.Fatalf("missing step error = %v", err)
+	}
+	wrong := complete
+	wrong.Cases = append([]results.CaseResult(nil), complete.Cases...)
+	wrong.Cases[1].Step = "status"
+	if err := verifyCaseCoverage([]manifest.Plan{plan}, []results.Report{wrong}); err == nil || !strings.Contains(err.Error(), "metadata mismatch") {
+		t.Fatalf("step metadata mismatch error = %v", err)
+	}
+	skipped := complete
+	skipped.Cases = append([]results.CaseResult(nil), complete.Cases...)
+	skipped.Cases[0].Status = "fail"
+	skipped.Cases[1].Status = "skipped"
+	if err := verifyCaseCoverage([]manifest.Plan{plan}, []results.Report{skipped}); err != nil {
+		t.Fatalf("reported skipped step should complete inventory: %v", err)
+	}
+}
+
 func TestVerifyReportProvenance(t *testing.T) {
 	reports := []results.Report{
 		{Target: "linux/amd64", ActionVersion: "owner/action@abc", Sliver: results.Provenance{Selector: "release:v1.2.3@0123456789012345678901234567890123456789", ResolvedSHA: "0123456789012345678901234567890123456789"}},

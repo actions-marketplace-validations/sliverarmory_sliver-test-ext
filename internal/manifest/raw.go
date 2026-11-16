@@ -1,5 +1,7 @@
 package manifest
 
+import "gopkg.in/yaml.v3"
+
 type rawConfig struct {
 	Schema   string          `yaml:"schema"`
 	Sliver   rawSliverConfig `yaml:"sliver"`
@@ -24,9 +26,34 @@ type rawTarget struct {
 }
 
 type rawTest struct {
-	Name        string `yaml:"name"`
-	Library     string `yaml:"library"`
+	Name        string     `yaml:"name"`
+	Library     string     `yaml:"library"`
+	Steps       *[]rawStep `yaml:"steps"`
 	rawSettings `yaml:",inline"`
+}
+
+type rawStep struct {
+	Name           string           `yaml:"name"`
+	Export         *string          `yaml:"export"`
+	ArgsUTF8       *string          `yaml:"args_utf8"`
+	ArgsBase64     *string          `yaml:"args_base64"`
+	CommandTimeout *string          `yaml:"command_timeout"`
+	Expect         *rawExpectation  `yaml:"expect"`
+	TCPProbe       *rawTCPProbe     `yaml:"tcp_probe"`
+	CommandProbe   *rawCommandProbe `yaml:"command_probe"`
+}
+
+type rawTCPProbe struct {
+	Port       yaml.Node `yaml:"port"`
+	State      string    `yaml:"state"`
+	Timeout    *string   `yaml:"timeout"`
+	BannerUTF8 *string   `yaml:"banner_utf8"`
+}
+
+type rawCommandProbe struct {
+	Path    string   `yaml:"path"`
+	Args    []string `yaml:"args"`
+	Timeout *string  `yaml:"timeout"`
 }
 
 type rawCollection struct {

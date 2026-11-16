@@ -1,10 +1,33 @@
 package harness
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func TestSanitizedImplantEnvKeepsOnlyScopedX11Values(t *testing.T) {
+	workspace := t.TempDir()
+	env := sanitizedImplantEnv([]string{
+		"PATH=/usr/bin", "DISPLAY=:99", "XAUTHORITY=auth/xauthority",
+		"GITHUB_TOKEN=secret", "ACTIONS_RUNTIME_TOKEN=runtime-secret",
+		"AWS_SECRET_ACCESS_KEY=cloud-secret", "UNRELATED=value",
+	}, "/private/home", "/private/tmp", workspace)
+	for _, required := range []string{
+		"PATH=/usr/bin", "DISPLAY=:99", "XAUTHORITY=" + filepath.Join(workspace, "auth/xauthority"),
+		"HOME=/private/home", "TMPDIR=/private/tmp",
+	} {
+		if !slices.Contains(env, required) {
+			t.Fatalf("sanitized implant environment missing %q: %v", required, env)
+		}
+	}
+	for _, forbidden := range []string{"GITHUB_TOKEN=", "ACTIONS_RUNTIME_TOKEN=", "AWS_SECRET_ACCESS_KEY=", "UNRELATED="} {
+		if slices.ContainsFunc(env, func(entry string) bool { return strings.HasPrefix(entry, forbidden) }) {
+			t.Fatalf("sanitized implant environment retained %q: %v", forbidden, env)
+		}
+	}
+}
 
 func TestSanitizedServerEnvExcludesCredentialsAndBuildControls(t *testing.T) {
 	env := sanitizedServerEnv([]string{

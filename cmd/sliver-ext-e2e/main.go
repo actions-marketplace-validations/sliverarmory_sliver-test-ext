@@ -477,14 +477,27 @@ func convertPlans(plans []manifest.Plan) ([]harness.Case, error) {
 			return nil, fmt.Errorf("read %s: %w", plan.ID, err)
 		}
 		digest := sha256.Sum256(library)
-		expected := harness.OutputExpectation{
-			Equals: plan.Settings.Expect.Output.Equals, Contains: append([]string(nil), plan.Settings.Expect.Output.Contains...),
-			NotContains: append([]string(nil), plan.Settings.Expect.Output.NotContains...),
-			Matches:     append([]string(nil), plan.Settings.Expect.Output.Matches...), SHA256: plan.Settings.Expect.Output.SHA256,
-		}
-		if plan.Settings.Expect.Output.HasEqualsB64 {
-			expected.EqualsBase64 = base64.StdEncoding.EncodeToString(plan.Settings.Expect.Output.EqualsBytes)
-			expected.HasEqualsBase64 = true
+		steps := make([]harness.Step, 0, len(plan.Steps))
+		for _, step := range plan.Steps {
+			converted := harness.Step{
+				Name: step.Name, Export: step.Export,
+				Arguments: append([]byte(nil), step.Arguments...), InterpolatePort: step.InterpolatePort,
+				CommandTimeout: step.CommandTimeout, Expectation: convertExpectation(step.Expect),
+			}
+			if step.TCPProbe != nil {
+				converted.TCPProbe = &harness.TCPProbe{
+					Port: step.TCPProbe.Port, AutoPort: step.TCPProbe.AutoPort,
+					State: step.TCPProbe.State, Timeout: step.TCPProbe.Timeout,
+					Banner: append([]byte(nil), step.TCPProbe.Banner...),
+				}
+			}
+			if step.CommandProbe != nil {
+				converted.CommandProbe = &harness.CommandProbe{
+					Path: step.CommandProbe.Path, Args: append([]string(nil), step.CommandProbe.Args...),
+					Timeout: step.CommandProbe.Timeout,
+				}
+			}
+			steps = append(steps, converted)
 		}
 		cases = append(cases, harness.Case{
 			ID: plan.ID, Suite: plan.Suite, Name: plan.Name, Collection: plan.Collection,
@@ -495,10 +508,23 @@ func convertPlans(plans []manifest.Plan) ([]harness.Case, error) {
 			Modes:  append([]string(nil), plan.Settings.Modes...),
 			Repeat: plan.Settings.Repeat, CommandTimeout: plan.Settings.CommandTimeout,
 			Arguments:   append([]byte(nil), plan.Settings.Arguments...),
-			Expectation: harness.Expectation{SuccessOnly: plan.Settings.Expect.SuccessOnly, Output: expected},
+			Expectation: convertExpectation(plan.Settings.Expect), Steps: steps,
 		})
 	}
 	return cases, nil
+}
+
+func convertExpectation(input manifest.Expectation) harness.Expectation {
+	output := harness.OutputExpectation{
+		Equals: input.Output.Equals, Contains: append([]string(nil), input.Output.Contains...),
+		NotContains: append([]string(nil), input.Output.NotContains...),
+		Matches:     append([]string(nil), input.Output.Matches...), SHA256: input.Output.SHA256,
+	}
+	if input.Output.HasEqualsB64 {
+		output.EqualsBase64 = base64.StdEncoding.EncodeToString(input.Output.EqualsBytes)
+		output.HasEqualsBase64 = true
+	}
+	return harness.Expectation{SuccessOnly: input.SuccessOnly, Output: output}
 }
 
 func auxiliaryPath(value, workspace string) (string, error) {
@@ -741,6 +767,7 @@ type executionKey struct {
 	id     string
 	mode   string
 	repeat int
+	step   int
 }
 
 type expectedExecution struct {
@@ -751,6 +778,7 @@ type expectedExecution struct {
 	librarySHA256 string
 	export        string
 	init          string
+	stepName      string
 }
 
 func verifyCaseCoverage(plans []manifest.Plan, reports []results.Report) error {
@@ -772,7 +800,16 @@ func verifyCaseCoverage(plans []manifest.Plan, reports []results.Report) error {
 		for _, mode := range plan.Settings.Modes {
 			validModes[executionKey{target: plan.Target.Key(), id: plan.ID, mode: mode}] = struct{}{}
 			for repeat := 1; repeat <= plan.Settings.Repeat; repeat++ {
-				expected[executionKey{target: plan.Target.Key(), id: plan.ID, mode: mode, repeat: repeat}] = metadata
+				if len(plan.Steps) == 0 {
+					expected[executionKey{target: plan.Target.Key(), id: plan.ID, mode: mode, repeat: repeat}] = metadata
+					continue
+				}
+				for index, step := range plan.Steps {
+					stepMetadata := metadata
+					stepMetadata.export = step.Export
+					stepMetadata.stepName = step.Name
+					expected[executionKey{target: plan.Target.Key(), id: plan.ID, mode: mode, repeat: repeat, step: index + 1}] = stepMetadata
+				}
 			}
 		}
 	}
@@ -785,25 +822,25 @@ func verifyCaseCoverage(plans []manifest.Plan, reports []results.Report) error {
 				}
 				continue
 			}
-			key := executionKey{target: report.Target, id: result.ID, mode: result.Mode, repeat: result.Repeat}
+			key := executionKey{target: report.Target, id: result.ID, mode: result.Mode, repeat: result.Repeat, step: result.StepIndex}
 			metadata, ok := expected[key]
 			if !ok {
-				problems = append(problems, fmt.Sprintf("unexpected case %s/%s/%s#%d", report.Target, result.ID, result.Mode, result.Repeat))
+				problems = append(problems, "unexpected case "+formatExecutionKey(key))
 				continue
 			}
 			if _, duplicate := seen[key]; duplicate {
-				problems = append(problems, fmt.Sprintf("duplicate case %s/%s/%s#%d", report.Target, result.ID, result.Mode, result.Repeat))
+				problems = append(problems, "duplicate case "+formatExecutionKey(key))
 				continue
 			}
 			seen[key] = struct{}{}
-			if result.Suite != metadata.suite || result.Test != metadata.test || result.Collection != metadata.collection || result.Library != metadata.library || result.LibrarySHA256 != metadata.librarySHA256 || result.Export != metadata.export || result.Init != metadata.init {
-				problems = append(problems, fmt.Sprintf("metadata mismatch for %s/%s/%s#%d", report.Target, result.ID, result.Mode, result.Repeat))
+			if result.Suite != metadata.suite || result.Test != metadata.test || result.Collection != metadata.collection || result.Library != metadata.library || result.LibrarySHA256 != metadata.librarySHA256 || result.Export != metadata.export || result.Init != metadata.init || result.Step != metadata.stepName {
+				problems = append(problems, "metadata mismatch for "+formatExecutionKey(key))
 			}
 		}
 	}
 	for key := range expected {
 		if _, ok := seen[key]; !ok {
-			problems = append(problems, fmt.Sprintf("missing case %s/%s/%s#%d", key.target, key.id, key.mode, key.repeat))
+			problems = append(problems, "missing case "+formatExecutionKey(key))
 		}
 	}
 	sort.Strings(problems)
@@ -811,6 +848,14 @@ func verifyCaseCoverage(plans []manifest.Plan, reports []results.Report) error {
 		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func formatExecutionKey(key executionKey) string {
+	identifier := fmt.Sprintf("%s/%s/%s#%d", key.target, key.id, key.mode, key.repeat)
+	if key.step != 0 {
+		return fmt.Sprintf("%s/step-%d", identifier, key.step)
+	}
+	return identifier
 }
 
 func verifyReportProvenance(reports []results.Report) error {

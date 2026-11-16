@@ -10,18 +10,26 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/sliverarmory/sliver-test-ext/internal/safepath"
+	"gopkg.in/yaml.v3"
 )
 
 const (
-	maxRepeat      = 1000
-	maxTimeout     = 24 * time.Hour
-	maxInlineBytes = 16 << 20
+	maxRepeat        = 1000
+	maxTimeout       = 24 * time.Hour
+	maxInlineBytes   = 16 << 20
+	maxSequenceSteps = 32
+	maxProbeTimeout  = 2 * time.Minute
+	maxBannerBytes   = 4 << 10
+	maxProbeArgs     = 32
+	maxProbeArgBytes = 4 << 10
 )
 
 var versionPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$`)
 var commitPattern = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 
-func normalize(raw rawConfig, libraries pathResolver) (Config, []Plan, error) {
+func normalize(raw rawConfig, libraries, workspace pathResolver, rejectProbeSymlinks bool) (Config, []Plan, error) {
 	if raw.Schema != SchemaV1 {
 		return Config{}, nil, fmt.Errorf("schema must be %q", SchemaV1)
 	}
@@ -87,14 +95,27 @@ func normalize(raw rawConfig, libraries pathResolver) (Config, []Plan, error) {
 			if err := validateLibrary(library, target); err != nil {
 				return Config{}, nil, fmt.Errorf("%s.library: %w", testWhere, err)
 			}
-			settings, err := normalizeSettings(defaults, inputTest.rawSettings, testWhere, true)
+			sequenced := inputTest.Steps != nil
+			if sequenced && (inputTest.ArgsUTF8 != nil || inputTest.ArgsBase64 != nil || inputTest.Expect != nil) {
+				return Config{}, nil, fmt.Errorf("%s cannot set test-level args_utf8, args_base64, or expect when steps is present", testWhere)
+			}
+			settings, err := normalizeSettings(defaults, inputTest.rawSettings, testWhere, !sequenced)
 			if err != nil {
 				return Config{}, nil, err
 			}
-			suite.Tests = append(suite.Tests, Test{Name: inputTest.Name, Library: library, Settings: cloneSettings(settings)})
+			var steps []Step
+			if sequenced {
+				settings.Arguments = nil
+				settings.Expect = Expectation{}
+				steps, err = normalizeSteps(*inputTest.Steps, settings, workspace, rejectProbeSymlinks, testWhere+".steps")
+				if err != nil {
+					return Config{}, nil, err
+				}
+			}
+			suite.Tests = append(suite.Tests, Test{Name: inputTest.Name, Library: library, Settings: cloneSettings(settings), Steps: cloneSteps(steps)})
 			plan := Plan{
 				ID: input.Name + "/" + inputTest.Name, Suite: input.Name, Name: inputTest.Name,
-				Library: library, LibraryPath: libraryPath, Target: target, Settings: settings,
+				Library: library, LibraryPath: libraryPath, Target: target, Settings: settings, Steps: steps,
 			}
 			if err := appendUniquePlan(&plans, planIDs, plan); err != nil {
 				return Config{}, nil, err
@@ -230,6 +251,185 @@ func normalizeSettings(base Settings, raw rawSettings, where string, complete bo
 	return settings, nil
 }
 
+func normalizeSteps(raw []rawStep, base Settings, workspace pathResolver, rejectProbeSymlinks bool, where string) ([]Step, error) {
+	if len(raw) == 0 || len(raw) > maxSequenceSteps {
+		return nil, fmt.Errorf("%s must contain between 1 and %d steps", where, maxSequenceSteps)
+	}
+	steps := make([]Step, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	anyAutoPort := false
+	for index, input := range raw {
+		stepWhere := fmt.Sprintf("%s[%d]", where, index)
+		if err := validateName(input.Name); err != nil {
+			return nil, fmt.Errorf("%s.name: %w", stepWhere, err)
+		}
+		if _, exists := seen[input.Name]; exists {
+			return nil, fmt.Errorf("%s.name %q is duplicated", stepWhere, input.Name)
+		}
+		seen[input.Name] = struct{}{}
+		step := Step{Name: input.Name, Export: base.Export, CommandTimeout: base.CommandTimeout}
+		if input.Export != nil {
+			step.Export = *input.Export
+		}
+		if strings.TrimSpace(step.Export) == "" || strings.TrimSpace(step.Export) != step.Export || strings.ContainsRune(step.Export, '\x00') {
+			return nil, fmt.Errorf("%s.export is required and must not contain NUL or surrounding whitespace", stepWhere)
+		}
+		if input.CommandTimeout != nil {
+			duration, err := time.ParseDuration(*input.CommandTimeout)
+			if err != nil {
+				return nil, fmt.Errorf("%s.command_timeout: %w", stepWhere, err)
+			}
+			step.CommandTimeout = duration
+		}
+		if step.CommandTimeout <= 0 || step.CommandTimeout > maxTimeout {
+			return nil, fmt.Errorf("%s.command_timeout must be greater than zero and no more than %s", stepWhere, maxTimeout)
+		}
+		arguments, interpolate, err := normalizeStepArguments(input.ArgsUTF8, input.ArgsBase64, stepWhere)
+		if err != nil {
+			return nil, err
+		}
+		step.Arguments, step.InterpolatePort = arguments, interpolate
+		if input.Expect == nil {
+			return nil, fmt.Errorf("%s.expect is required", stepWhere)
+		}
+		step.Expect, err = normalizeExpectation(*input.Expect, stepWhere+".expect")
+		if err != nil {
+			return nil, err
+		}
+		if input.TCPProbe != nil {
+			step.TCPProbe, err = normalizeTCPProbe(*input.TCPProbe, stepWhere+".tcp_probe")
+			if err != nil {
+				return nil, err
+			}
+			anyAutoPort = anyAutoPort || step.TCPProbe.AutoPort
+		}
+		if input.CommandProbe != nil {
+			step.CommandProbe, err = normalizeCommandProbe(*input.CommandProbe, workspace, rejectProbeSymlinks, stepWhere+".command_probe")
+			if err != nil {
+				return nil, err
+			}
+		}
+		steps = append(steps, step)
+	}
+	for index, step := range steps {
+		if step.InterpolatePort && !anyAutoPort {
+			return nil, fmt.Errorf("%s[%d].args_utf8 uses ${TCP_PORT} without a tcp_probe.port: auto in this sequence", where, index)
+		}
+		if step.CommandProbe != nil && !anyAutoPort {
+			for _, arg := range step.CommandProbe.Args {
+				if arg == "${TCP_PORT}" {
+					return nil, fmt.Errorf("%s[%d].command_probe.args uses ${TCP_PORT} without a tcp_probe.port: auto in this sequence", where, index)
+				}
+			}
+		}
+	}
+	return steps, nil
+}
+
+func normalizeStepArguments(utf8Value, base64Value *string, where string) ([]byte, bool, error) {
+	if utf8Value != nil && base64Value != nil {
+		return nil, false, fmt.Errorf("%s cannot set both args_utf8 and args_base64", where)
+	}
+	if base64Value != nil {
+		decoded, err := decodeBase64(*base64Value, where+".args_base64")
+		return decoded, false, err
+	}
+	if utf8Value == nil {
+		return nil, false, nil
+	}
+	value := *utf8Value
+	if !utf8.ValidString(value) {
+		return nil, false, fmt.Errorf("%s.args_utf8 must contain valid UTF-8", where)
+	}
+	if len(value) > maxInlineBytes {
+		return nil, false, fmt.Errorf("%s.args_utf8 exceeds %d bytes", where, maxInlineBytes)
+	}
+	withoutPort := strings.ReplaceAll(value, "${TCP_PORT}", "")
+	if strings.Contains(withoutPort, "${") {
+		return nil, false, fmt.Errorf("%s.args_utf8 contains an unsupported ${...} placeholder", where)
+	}
+	return []byte(value), strings.Contains(value, "${TCP_PORT}"), nil
+}
+
+func normalizeTCPProbe(raw rawTCPProbe, where string) (*TCPProbe, error) {
+	probe := &TCPProbe{State: raw.State, Timeout: 10 * time.Second}
+	switch {
+	case raw.Port.Kind == yaml.ScalarNode && raw.Port.Tag == "!!str" && raw.Port.Value == "auto":
+		probe.AutoPort = true
+	case raw.Port.Kind == yaml.ScalarNode && raw.Port.Tag == "!!int":
+		var port int
+		if err := raw.Port.Decode(&port); err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("%s.port must be an integer from 1 to 65535 or auto", where)
+		}
+		probe.Port = uint16(port)
+	default:
+		return nil, fmt.Errorf("%s.port must be an integer from 1 to 65535 or auto", where)
+	}
+	if probe.State != "open" && probe.State != "closed" {
+		return nil, fmt.Errorf("%s.state must be open or closed", where)
+	}
+	if raw.Timeout != nil {
+		duration, err := time.ParseDuration(*raw.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("%s.timeout: %w", where, err)
+		}
+		probe.Timeout = duration
+	}
+	if probe.Timeout <= 0 || probe.Timeout > maxProbeTimeout {
+		return nil, fmt.Errorf("%s.timeout must be greater than zero and no more than %s", where, maxProbeTimeout)
+	}
+	if raw.BannerUTF8 != nil {
+		if probe.State != "open" {
+			return nil, fmt.Errorf("%s.banner_utf8 requires state: open", where)
+		}
+		if !utf8.ValidString(*raw.BannerUTF8) || len(*raw.BannerUTF8) > maxBannerBytes {
+			return nil, fmt.Errorf("%s.banner_utf8 must be valid UTF-8 and no more than %d bytes", where, maxBannerBytes)
+		}
+		probe.Banner = []byte(*raw.BannerUTF8)
+	}
+	return probe, nil
+}
+
+func normalizeCommandProbe(raw rawCommandProbe, workspace pathResolver, rejectSymlinks bool, where string) (*CommandProbe, error) {
+	if err := safepath.ValidatePortableRelative(raw.Path); err != nil {
+		return nil, fmt.Errorf("%s.path: %w", where, err)
+	}
+	path := filepath.Join(workspace.root, filepath.FromSlash(raw.Path))
+	if rejectSymlinks {
+		if err := rejectSymlinkPath(workspace.root, path); err != nil {
+			return nil, fmt.Errorf("%s.path: %w", where, err)
+		}
+	}
+	resolved, err := workspace.file(path, where+".path")
+	if err != nil {
+		return nil, err
+	}
+	probe := &CommandProbe{Path: resolved, Timeout: 30 * time.Second}
+	if len(raw.Args) > maxProbeArgs {
+		return nil, fmt.Errorf("%s.args may contain at most %d arguments", where, maxProbeArgs)
+	}
+	for index, arg := range raw.Args {
+		if !utf8.ValidString(arg) || strings.ContainsRune(arg, '\x00') || len(arg) > maxProbeArgBytes {
+			return nil, fmt.Errorf("%s.args[%d] must be valid UTF-8 without NUL and no more than %d bytes", where, index, maxProbeArgBytes)
+		}
+		if strings.Contains(arg, "${") && arg != "${TCP_PORT}" {
+			return nil, fmt.Errorf("%s.args[%d] contains an unsupported or partial ${...} placeholder", where, index)
+		}
+		probe.Args = append(probe.Args, arg)
+	}
+	if raw.Timeout != nil {
+		duration, err := time.ParseDuration(*raw.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("%s.timeout: %w", where, err)
+		}
+		probe.Timeout = duration
+	}
+	if probe.Timeout <= 0 || probe.Timeout > maxProbeTimeout {
+		return nil, fmt.Errorf("%s.timeout must be greater than zero and no more than %s", where, maxProbeTimeout)
+	}
+	return probe, nil
+}
+
 func validateCoreSettings(settings Settings, where string) error {
 	if strings.ContainsRune(settings.Export, '\x00') || (settings.Export != "" && strings.TrimSpace(settings.Export) != settings.Export) {
 		return fmt.Errorf("%s.export must not contain NUL or surrounding whitespace", where)
@@ -347,16 +547,45 @@ func hasOutputExpectation(output OutputExpectation) bool {
 
 func cloneSettings(input Settings) Settings {
 	output := input
-	if input.Expect.Output.Equals != nil {
-		equals := *input.Expect.Output.Equals
-		output.Expect.Output.Equals = &equals
-	}
+	output.Expect = cloneExpectation(input.Expect)
 	output.Modes = append([]string(nil), input.Modes...)
 	output.Arguments = append([]byte(nil), input.Arguments...)
-	output.Expect.Output.Contains = append([]string(nil), input.Expect.Output.Contains...)
-	output.Expect.Output.NotContains = append([]string(nil), input.Expect.Output.NotContains...)
-	output.Expect.Output.Matches = append([]string(nil), input.Expect.Output.Matches...)
-	output.Expect.Output.EqualsBytes = append([]byte(nil), input.Expect.Output.EqualsBytes...)
+	return output
+}
+
+func cloneExpectation(input Expectation) Expectation {
+	output := input
+	if input.Output.Equals != nil {
+		equals := *input.Output.Equals
+		output.Output.Equals = &equals
+	}
+	output.Output.Contains = append([]string(nil), input.Output.Contains...)
+	output.Output.NotContains = append([]string(nil), input.Output.NotContains...)
+	output.Output.Matches = append([]string(nil), input.Output.Matches...)
+	output.Output.EqualsBytes = append([]byte(nil), input.Output.EqualsBytes...)
+	return output
+}
+
+func cloneSteps(input []Step) []Step {
+	if input == nil {
+		return nil
+	}
+	output := make([]Step, len(input))
+	for index, step := range input {
+		output[index] = step
+		output[index].Arguments = append([]byte(nil), step.Arguments...)
+		output[index].Expect = cloneExpectation(step.Expect)
+		if step.TCPProbe != nil {
+			probe := *step.TCPProbe
+			probe.Banner = append([]byte(nil), step.TCPProbe.Banner...)
+			output[index].TCPProbe = &probe
+		}
+		if step.CommandProbe != nil {
+			probe := *step.CommandProbe
+			probe.Args = append([]string(nil), step.CommandProbe.Args...)
+			output[index].CommandProbe = &probe
+		}
+	}
 	return output
 }
 

@@ -49,6 +49,7 @@ type Test struct {
 	Name     string   `json:"name"`
 	Library  string   `json:"library"`
 	Settings Settings `json:"settings"`
+	Steps    []Step   `json:"steps,omitempty"`
 }
 
 // Collection records the normalized shared settings and matched libraries.
@@ -69,6 +70,37 @@ type Settings struct {
 	Expect         Expectation   `json:"expect"`
 }
 
+// Step is one ordered call to a registered extension. The optional TCP probe
+// runs after the call and its output assertion, before the next step.
+type Step struct {
+	Name            string        `json:"name"`
+	Export          string        `json:"export"`
+	Arguments       []byte        `json:"arguments,omitempty"`
+	InterpolatePort bool          `json:"interpolate_port,omitempty"`
+	CommandTimeout  time.Duration `json:"command_timeout"`
+	Expect          Expectation   `json:"expect"`
+	TCPProbe        *TCPProbe     `json:"tcp_probe,omitempty"`
+	CommandProbe    *CommandProbe `json:"command_probe,omitempty"`
+}
+
+// TCPProbe checks a loopback listener after an extension call. AutoPort uses a
+// single controller-selected port for all auto probes in one case/mode run.
+type TCPProbe struct {
+	Port     uint16        `json:"port,omitempty"`
+	AutoPort bool          `json:"auto_port,omitempty"`
+	State    string        `json:"state"`
+	Timeout  time.Duration `json:"timeout"`
+	Banner   []byte        `json:"banner,omitempty"`
+}
+
+// CommandProbe runs a caller-owned executable after a call in the controller's
+// credential-free phase. Path is an absolute, workspace-confined file path.
+type CommandProbe struct {
+	Path    string        `json:"path"`
+	Args    []string      `json:"args,omitempty"`
+	Timeout time.Duration `json:"timeout"`
+}
+
 type Expectation struct {
 	SuccessOnly bool              `json:"success_only"`
 	Output      OutputExpectation `json:"output"`
@@ -84,8 +116,9 @@ type OutputExpectation struct {
 	HasEqualsB64 bool     `json:"-"`
 }
 
-// Plan describes one library registration and export invocation. Modes and
-// Repeat specify how many independent implant executions the harness performs.
+// Plan describes one library registration and either one legacy invocation or
+// an ordered sequence of steps. Modes select implants; Repeat repeats calls or
+// sequences on the same connected implant for each mode.
 type Plan struct {
 	ID          string   `json:"id"`
 	Suite       string   `json:"suite"`
@@ -95,6 +128,7 @@ type Plan struct {
 	LibraryPath string   `json:"library_path"`
 	Target      Target   `json:"target"`
 	Settings    Settings `json:"settings"`
+	Steps       []Step   `json:"steps,omitempty"`
 }
 
 type Matrix struct {

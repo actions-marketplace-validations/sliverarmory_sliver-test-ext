@@ -22,6 +22,35 @@ type Expectation struct {
 	Output      OutputExpectation
 }
 
+// Step is one call against an already registered library on a live implant.
+// A case's entire ordered step list is repeated on that same implant.
+type Step struct {
+	Name            string
+	Export          string
+	Arguments       []byte
+	InterpolatePort bool
+	CommandTimeout  time.Duration
+	Expectation     Expectation
+	TCPProbe        *TCPProbe
+	CommandProbe    *CommandProbe
+}
+
+type TCPProbe struct {
+	Port     uint16
+	AutoPort bool
+	State    string
+	Timeout  time.Duration
+	Banner   []byte
+}
+
+// CommandProbe runs a caller-owned executable after a successful extension
+// call and optional TCP probe. Path is resolved and confined by the manifest.
+type CommandProbe struct {
+	Path    string
+	Args    []string
+	Timeout time.Duration
+}
+
 type Case struct {
 	ID                string
 	Name              string
@@ -39,6 +68,7 @@ type Case struct {
 	Repeat            int
 	CommandTimeout    time.Duration
 	Expectation       Expectation
+	Steps             []Step
 }
 
 type Target struct {

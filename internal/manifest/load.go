@@ -70,7 +70,7 @@ func load(path, workspace, libraryRoot string, rejectLibrarySymlinks, isolatedLi
 		return nil, fmt.Errorf("decode trailing YAML document: %w", err)
 	}
 
-	config, plans, err := normalize(raw, libraries)
+	config, plans, err := normalize(raw, libraries, paths, rejectLibrarySymlinks)
 	if err != nil {
 		return nil, err
 	}

@@ -173,6 +173,8 @@ printf '%s\\n' "$@" > "${controller}.args"
         ...process.env,
         ACTIONS_RUNTIME_TOKEN: 'automatic-service-secret',
         AWS_SECRET_ACCESS_KEY: 'unrelated-job-secret',
+        DISPLAY: ':99',
+        XAUTHORITY: path.join(directory, 'xauthority'),
         GITHUB_TOKEN: 'forwarded-token',
         GITHUB_OUTPUT: path.join(directory, 'workflow-output'),
         'INPUT_GITHUB-TOKEN': 'action-input-secret',
@@ -198,6 +200,8 @@ printf '%s\\n' "$@" > "${controller}.args"
       assert.doesNotMatch(runtimeEnvironment, new RegExp(`^${name}=`, 'm'));
     }
     assert.match(runtimeEnvironment, new RegExp(`^RUNNER_TEMP=${directory}$`, 'm'));
+    assert.match(runtimeEnvironment, /^DISPLAY=:99$/m);
+    assert.match(runtimeEnvironment, new RegExp(`^XAUTHORITY=${directory}/xauthority$`, 'm'));
 
     const arguments_ = fs.readFileSync(`${controller}.args`, 'utf8');
     assert.match(arguments_, /--prepared\n/);

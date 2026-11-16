@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -13,9 +14,10 @@ import (
 )
 
 const (
-	cleanupGraceTimeout   = 2 * time.Second
-	cleanupProcessTimeout = 10 * time.Second
-	logTailBytes          = 256 << 10
+	cleanupGraceTimeout         = 2 * time.Second
+	cleanupProcessTimeout       = 10 * time.Second
+	logTailBytes                = 256 << 10
+	probeOutputLimit      int64 = 1 << 20
 )
 
 type managedProcess struct {
@@ -29,6 +31,10 @@ type managedProcess struct {
 }
 
 func startProcess(path string, args []string, dir string, env []string, logPath string) (*managedProcess, error) {
+	return startProcessWithOutputLimit(path, args, dir, env, logPath, 0)
+}
+
+func startProcessWithOutputLimit(path string, args []string, dir string, env []string, logPath string, outputLimit int64) (*managedProcess, error) {
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, err
@@ -36,8 +42,14 @@ func startProcess(path string, args []string, dir string, env []string, logPath 
 	cmd := exec.Command(path, args...)
 	cmd.Dir = dir
 	cmd.Env = env
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	if outputLimit > 0 {
+		writer := &boundedOutputWriter{file: logFile, remaining: outputLimit}
+		cmd.Stdout = writer
+		cmd.Stderr = writer
+	} else {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
 	prepareCommand(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
@@ -57,6 +69,27 @@ func startProcess(path string, args []string, dir string, env []string, logPath 
 		close(process.done)
 	}()
 	return process, nil
+}
+
+// boundedOutputWriter retains the beginning of a probe's output and discards
+// the rest, so a noisy caller helper cannot fill the runner's filesystem.
+type boundedOutputWriter struct {
+	mu        sync.Mutex
+	file      *os.File
+	remaining int64
+}
+
+func (writer *boundedOutputWriter) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.remaining > 0 {
+		length := min(int64(len(data)), writer.remaining)
+		if _, err := writer.file.Write(data[:length]); err != nil {
+			return 0, err
+		}
+		writer.remaining -= length
+	}
+	return len(data), nil
 }
 
 func (process *managedProcess) PID() int { return process.cmd.Process.Pid }
@@ -152,15 +185,18 @@ func envWith(env []string, name string, value string) []string {
 	return append(updated, name+"="+value)
 }
 
-func sanitizedImplantEnv(hostEnv []string, home string, temp string) []string {
+func sanitizedImplantEnv(hostEnv []string, home string, temp string, workspace string) []string {
 	allowed := map[string]bool{
 		"COMSPEC": true, "PATH": true, "PATHEXT": true, "SYSTEMDRIVE": true,
-		"SYSTEMROOT": true, "WINDIR": true,
+		"SYSTEMROOT": true, "WINDIR": true, "DISPLAY": true, "XAUTHORITY": true,
 	}
 	result := make([]string, 0, len(allowed)+7)
 	for _, entry := range hostEnv {
 		name, value, found := strings.Cut(entry, "=")
-		if found && allowed[strings.ToUpper(name)] {
+		if strings.EqualFold(name, "XAUTHORITY") && value != "" && !filepath.IsAbs(value) {
+			value = filepath.Join(workspace, value)
+		}
+		if found && value != "" && allowed[strings.ToUpper(name)] {
 			result = envWith(result, strings.ToUpper(name), value)
 		}
 	}

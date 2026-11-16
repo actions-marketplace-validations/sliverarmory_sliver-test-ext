@@ -108,7 +108,43 @@ Each `test` names a workspace-relative native `library` and an effective `export
 
 The harness exercises Sliver's native register, list, and call RPCs with the compiled library. It does not parse a package's `extension.json` or exercise client command registration; set the target, export, and init explicitly in this test manifest.
 
-Use exactly one of `args_utf8` or `args_base64` for invocation bytes. `args_utf8` supplies its UTF-8 bytes directly; `args_base64` supplies decoded binary bytes. Omitting both invokes the export with empty arguments. `modes` accepts `session`, `beacon`, or both. `repeat` runs each mode the requested number of times. `command_timeout` bounds an invocation. Each mode and repeat has a separate result.
+Use exactly one of `args_utf8` or `args_base64` for invocation bytes. `args_utf8` supplies its UTF-8 bytes directly; `args_base64` supplies decoded binary bytes. Omitting both invokes the export with empty arguments. `modes` accepts `session`, `beacon`, or both. For single-call tests, `repeat` repeats that call and records a result for each mode and repeat. `command_timeout` bounds an invocation.
+
+### Ordered lifecycle tests
+
+Use `tests[].steps` when several calls must run against the same registered library and live implant. Each named step has its own arguments and required `expect`; it may override the test's `export` and `command_timeout`. Put `init`, `modes`, and `repeat` on the test or defaults. For a sequence, `repeat` runs the whole step list again on that connected implant. A sequenced test cannot also set test-level arguments or expectations. The action records each step separately, so a failure identifies the call or probe that failed. Existing single-call tests keep their v1 behavior.
+
+For a listener lifecycle, use `tcp_probe.port: auto` and pass `${TCP_PORT}` in a step's `args_utf8`. One loopback port is selected for the sequence and reused through start, stop, and restart. An `open` probe can check exact initial bytes with `banner_utf8`; a `closed` probe requires connection refusal. Each probe has a bounded `timeout`.
+
+```yaml
+tests:
+  - name: vnc-lifecycle
+    library: build/linux/amd64/vnc.so
+    export: VNCDesktopCommand
+    modes: [session, beacon]
+    steps:
+      - name: start
+        args_utf8: 'start --port ${TCP_PORT}'
+        expect: {output: {contains: [started]}}
+        tcp_probe:
+          port: auto
+          state: open
+          timeout: 10s
+          banner_utf8: "RFB 003.008\n"
+        command_probe:
+          path: test/rfb_capture.py
+          args: ['--port', '${TCP_PORT}']
+          timeout: 30s
+      - name: status
+        args_utf8: status
+        expect: {output: {contains: [running]}}
+      - name: stop
+        args_utf8: stop
+        expect: {output: {contains: [stopped]}}
+        tcp_probe: {port: auto, state: closed, timeout: 10s}
+```
+
+`command_probe` runs after the extension output assertion and TCP probe. Its `path` is a workspace-confined executable, its `args` may contain `${TCP_PORT}`, and a nonzero exit or timeout fails that step. It runs in the credential-free phase with a limited environment. A caller can use it for a full RFB handshake and framebuffer assertion; this repository's [probe script](test/fixture/rfb_probe.py) checks a deterministic synthetic framebuffer. The complete [stateful fixture manifest](test/fixture/stateful-rfb-e2e.yml) also checks duplicate start, stopped status, and restart.
 
 `expect.output` supports `equals`, `contains`, `not_contains`, `matches` (Go regular expressions), `sha256`, and `equals_base64` for exact binary output. Use `expect.success_only: true` for an extension with no stable output. At least one explicit expectation is required. Assertions inspect the final extension response, including the completed beacon task result, rather than treating the initial asynchronous task acknowledgement as success. String equality and regular-expression matching require UTF-8 output; binary output can use `equals_base64` or `sha256`.
 
@@ -150,6 +186,12 @@ jobs:
 The root action outputs `results-dir` and `resolved-sliver`. `sliver-server-path` can supply an existing server binary for a direct single-target run; its digest is recorded. For `linux/386`, use the reusable workflow unless the caller supplies a complete i386 userspace and the 32-bit compiler expected by Sliver.
 
 This repository's CI builds [a small native extension](test/fixture/native_extension.c) and runs the root action on `linux/amd64` with [an exact output assertion](test/fixture/sliver-ext-e2e.yml) in both session and beacon modes. The fixture verifies registration, initialization, argument delivery, callback output, and the final response path.
+
+The CI sequence job builds a second [stateful RFB extension](test/fixture/stateful_rfb_extension.c) and runs [ordered lifecycle steps](test/fixture/stateful-rfb-e2e.yml) on one implant per mode. Its host probe checks the RFB 3.8 handshake and a 2×2 raw framebuffer. The original single-call smoke job remains in CI for manifest compatibility.
+
+For an extension that captures a real Linux display, start Xvfb in the caller job before invoking the **direct action** on a native Linux runner, then set `DISPLAY` through `GITHUB_ENV`. If Xvfb uses an authority file, set `XAUTHORITY` to that file as well. The action passes only those X11 values into the implant environment; it does not forward GitHub tokens or cloud credentials. The Linux/386 Docker route does not mount the host X11 socket or authority file, so run display capture tests on native `linux/amd64` or `linux/arm64`.
+
+Pin a verified full commit SHA for required checks. A published release tag such as `v0.1.1` can be used for convenience.
 
 ## Sliver acquisition and lifecycle
 

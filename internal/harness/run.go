@@ -188,8 +188,16 @@ func validateRunOptions(opts Options) error {
 		if testCase.Target != opts.Target {
 			return fmt.Errorf("case %q targets %s, runner targets %s", testCase.Name, testCase.Target, opts.Target)
 		}
-		if testCase.Export == "" || testCase.Repeat < 1 {
-			return fmt.Errorf("case %q requires an export and positive repeat count", testCase.Name)
+		if testCase.Repeat < 1 {
+			return fmt.Errorf("case %q requires a positive repeat count", testCase.Name)
+		}
+		if len(testCase.Steps) == 0 && testCase.Export == "" {
+			return fmt.Errorf("case %q requires an export", testCase.Name)
+		}
+		for index, step := range testCase.Steps {
+			if step.Name == "" || step.Export == "" {
+				return fmt.Errorf("case %q step %d requires a name and export", testCase.Name, index+1)
+			}
 		}
 	}
 	if stat, err := os.Stat(opts.ServerPath); err != nil {
@@ -396,7 +404,7 @@ func (runner *runtimeHarness) runCase(testCase Case, implant generatedImplant, c
 		return
 	}
 	process, err := startProcess(implant.path, nil, caseRoot,
-		sanitizedImplantEnv(os.Environ(), home, temp), logPath)
+		sanitizedImplantEnv(os.Environ(), home, temp, runner.opts.Workspace), logPath)
 	if err != nil {
 		runner.addFailure(testCase, implant.mode, 1, "start-implant", err, logPath)
 		return
@@ -426,6 +434,11 @@ func (runner *runtimeHarness) runCase(testCase Case, implant generatedImplant, c
 	}
 	if err := runner.registerLibrary(target, process, testCase, library); err != nil {
 		runner.addFailure(testCase, implant.mode, 1, "register-extension", err, logPath)
+		runner.recordProcessCleanup(testCase, implant.mode, process, logPath)
+		return
+	}
+	if len(testCase.Steps) > 0 {
+		runner.runSequence(testCase, target, process, implant.mode, home, temp, logPath)
 		runner.recordProcessCleanup(testCase, implant.mode, process, logPath)
 		return
 	}

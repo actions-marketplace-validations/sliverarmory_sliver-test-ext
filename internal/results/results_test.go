@@ -42,6 +42,27 @@ func TestReportAddAndFailed(t *testing.T) {
 	}
 }
 
+func TestSequencedResultsIdentifyFailureAndSkippedSteps(t *testing.T) {
+	report := &Report{Schema: Schema, Target: "linux/amd64"}
+	report.Add(CaseResult{ID: "vnc/lifecycle", Suite: "vnc", Test: "lifecycle", Step: "start", StepIndex: 1,
+		Mode: "session", Repeat: 1, Status: "fail", Stage: "tcp-probe", Error: "banner mismatch"})
+	report.Add(CaseResult{ID: "vnc/lifecycle", Suite: "vnc", Test: "lifecycle", Step: "stop", StepIndex: 2,
+		Mode: "session", Repeat: 1, Status: "skipped", Stage: "prior-step-failed"})
+	if !report.Failed() {
+		t.Fatal("a failed sequence must fail its report")
+	}
+	junit := report.JUnit()
+	for _, want := range []string{`failures="1"`, `skipped="1"`, `vnc/lifecycle/1:start [session #1]`, `vnc/lifecycle/2:stop [session #1]`, `<skipped message="prior-step-failed"></skipped>`} {
+		if !strings.Contains(junit, want) {
+			t.Errorf("JUnit missing %q:\n%s", want, junit)
+		}
+	}
+	markdown := report.Markdown()
+	if !strings.Contains(markdown, "vnc/lifecycle/1:start") || !strings.Contains(markdown, "vnc/lifecycle/2:stop") {
+		t.Fatalf("summary does not identify sequence steps:\n%s", markdown)
+	}
+}
+
 func TestReportWriteProducesJSONJUnitAndMarkdown(t *testing.T) {
 	dir := t.TempDir()
 	started := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
