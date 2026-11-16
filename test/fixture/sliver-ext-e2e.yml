@@ -1,0 +1,22 @@
+schema: sliver-ext-e2e/v1
+
+sliver:
+  version: master
+
+defaults:
+  modes: [session, beacon]
+  repeat: 1
+  command_timeout: 2m
+
+suites:
+  - name: linux-amd64-smoke
+    target: {os: linux, arch: amd64}
+    tests:
+      - name: echo
+        library: test/fixture/build/linux/amd64/native_extension.so
+        export: FixtureEcho
+        init: FixtureInit
+        args_utf8: ping
+        expect:
+          output:
+            equals: 'extension-ok:ping'

@@ -1,0 +1,36 @@
+name: Plan Sliver extension end-to-end matrix
+description: Validate a Sliver extension manifest and emit its GitHub Actions runner matrix.
+
+inputs:
+  manifest:
+    description: Path to the sliver-ext-e2e/v1 manifest, relative to the caller workspace.
+    required: false
+    default: .github/sliver-ext-e2e.yml
+  sliver-version:
+    description: Optional Sliver selector override (master, latest, vX.Y.Z, or a full commit SHA). Defaults to manifest sliver.version.
+    required: false
+  results-dir:
+    description: Directory used for controller planning output.
+    required: false
+    default: .sliver-ext-e2e/results
+  github-token:
+    description: Optional GitHub token used to resolve Sliver versions.
+    required: false
+  mode:
+    description: Internal mode override.
+    required: false
+    default: plan
+
+outputs:
+  results-dir:
+    description: Absolute results directory.
+  resolved-sliver:
+    description: Immutable Sliver selector selected for every matrix job.
+  matrix:
+    description: GitHub Actions matrix JSON with target, runner, and key fields.
+  libraries-dir:
+    description: Private directory containing only validated extension libraries at workspace-relative paths.
+
+runs:
+  using: node24
+  main: ../../../dist/index.js
